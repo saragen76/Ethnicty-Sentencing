@@ -1,0 +1,347 @@
+---
+title: "decomp_sims"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(arm)
+```
+
+I'm following Raggi et al.
+
+
+### functions for decomposition
+
+the $g$ function
+
+```{r}
+g.fun <- function(xx,yy, beta_00, beta_xx, beta_ww, gamma_00, gamma_xx){
+  
+  yy*(beta_ww) + #+beta_xw if there was an interaction 
+    log((1 +  exp(beta_00 + beta_xx * xx))/
+          (1 + exp(beta_00 + beta_xx * xx + beta_ww))) + #+beta_xw if there was an interaction 
+    gamma_00 + gamma_xx * xx
+}
+
+#g.fun evaluated at beta_xx=0
+g.fun.star <-function(xx,yy, beta_00, beta_ww, gamma_00, gamma_xx){
+  yy*(beta_ww) + #+beta_xw if there was an interaction 
+    log((1 +  exp(beta_00))/
+          (1 + exp(beta_00 + beta_ww))) + #+beta_xw if there was an interaction 
+    gamma_00 + gamma_xx * xx
+}
+
+```
+
+# Without DE
+
+### parameter values
+```{r}
+p.x <- 0.1 #prevalence of x
+
+##x-w relationship
+
+#gamma_0 = log(p/(1-p)) where p is the probability of having a gun 
+#for white people 
+#I'm setting this at 0.14
+p.x0 <- 0.14
+gamma_0 <- log(p.x0/(1-p.x0))
+
+# black people are more likely to have a gun than white people
+# let's say a plausible set of values would be 0-3 times more likely
+p.x1w1 <- c(0.14,0.3,0.6) ## vary 
+gamma_x <- log(p.x1w1/(1-p.x1w1)) - gamma_0
+                 
+
+###x,w,y relationship
+#beta_0 is for white people who don't have guns
+#beta_0= log(p.x0w0/(1-p.x0w0))
+p.x0w0 <- c(0.4,0.5,0.6) #all plausible were this
+beta_0 <- log(p.x0w0/(1-p.x0w0))
+
+#beta_x is the direct effect. One possible value is 0, the others are positive
+beta_x <- 0
+
+#beta_w is added value of having a gun for white people 
+#we assume this does not depend on the race
+#let's assume that the chance of imprisonment increases
+#with having a gun
+p.w1 <- c(0.4,0.6,0.8) ##vary
+beta_w <- log(p.w1/(1-p.w1)) - beta_0 
+
+#no interactions
+#no confounders/covariates
+```
+
+
+### generate x, w and y
+
+```{r}
+n.reps <- 100
+
+tot.size <- length(gamma_x)*length(beta_0)*length(beta_w)
+
+test<-list()
+
+for(ii in 1:n.reps){
+n.samp <- 10000 #sample size
+
+keep.py=TE_glm=TE_x_OR=TE_x=IE_x=DE_x=RES_x=rep(NA,tot.size)
+
+l<-1
+num.df<-c(p.x1w1[1],p.x0w0[1],p.w1[1])
+
+#for loop here
+for(i in 1:length(gamma_x)){
+  for(j in 1:length(beta_0)){
+    for(k in 1:length(beta_w)){
+
+#i=1
+#j=1
+#k=1
+
+      
+#MoJ = tibble(x = rbinom(n.samp, 1, p.x)) %>%   #proportion of black offenders.
+#      mutate(p_w = invlogit(gamma_0 + gamma_x[i] * x)) %>%
+#      mutate(w =rbinom(n=length(n), size=1, prob=p_w)) %>% 
+#      mutate(p_y = exp(beta_0[j] + beta_x * x + beta_w[k] * w)/(1 + exp(beta_0[j] + beta_x * x + beta_w[k] * w))) %>%
+#      mutate(y=rbinom(n=length(n), size=1, prob=p_y))
+
+x <- rbinom(n.samp, 1, p.x)
+p_w <- invlogit(gamma_0 + gamma_x[i] * x)
+w <- rbinom(n=n.samp, size=1, p_w)
+p_y <- invlogit(beta_0[j] + beta_x * x + beta_w[k] * w)
+y <- rbinom(n=n.samp, size=1, p_y)
+
+MoJ <- data.frame(x=x,w=w,y=y)
+      
+#constraint 1: p(y)=0.55
+keep.py[l] <- (sum(MoJ$y)/n.samp)
+
+#constraint 2: TE/NAIVE OR betwee 1.5-1.6
+TE_glm[l]<-exp(glm(y ~ x, data=MoJ, family=binomial)$coef[2])
+
+### discrete x: TE, IE, DE and RES
+beta_est <- glm(y ~ x + w, data=MoJ, family = binomial)$coef
+gamma_est <- glm(w ~ x, data=MoJ, family=binomial)$coef
+
+#TE calculated the Maggi way
+TE_x[l] <- beta_est[2] + 
+  log((1 + exp(g.fun(1,1,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun(0,1,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))) - 
+  log((1 + exp(g.fun(1,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun(0,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2]))))
+
+TE_x_OR[l] <- exp(TE_x[l])
+
+#IE calculated the Maggi way
+IE_x[l] <- log((1 + exp(g.fun.star(1,1,beta_00 = beta_est[1], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun.star(0,1,beta_00 = beta_est[1], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))) - 
+  log((1 + exp(g.fun(1,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun(0,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2]))))
+
+#DE calculated the Raggi way 
+DE_x[l] <- beta_est[2]
+
+#RES caluclated the Raggi way
+RES_x[l] <- TE_x[l] - DE_x[l] - IE_x[l] 
+
+l<-l+1
+num.df <- rbind(num.df,c(p.x1w1[i],p.x0w0[j],p.w1[k]))
+    }
+  }
+}
+num.df<-num.df[-1,]
+internal<-cbind(num.df, keep.py,TE_glm, TE_x_OR, TE_x, IE_x, DE_x, RES_x)
+#print(dim(internal))
+#print(dim(test))
+test[[ii]] <- internal
+}
+testy <- unlist(test)
+testy<-array(testy,dim=c(tot.size,10,n.reps))
+mean.vals <- data.frame(round(apply(testy,c(1,2), mean),3))
+colnames(mean.vals) <- c("p.x1w1","p.x0w0","p.w1","keep.py","TE_glm", "TE_x_OR", "TE_x", "IE_x", "DE_x", "RES_x")
+sd.vals <- data.frame(round(apply(testy,c(1,2), sd),3))
+colnames(sd.vals) <- colnames(mean.vals)
+
+write.csv(mean.vals, "mean.vals.node.1.csv", row.names = FALSE)
+write.csv(sd.vals, "sd.vals.node.1.csv", row.names = FALSE)
+
+#test<-cbind(num.df, test)
+plaus <- subset(mean.vals, TE_glm>1.3)
+#plaus <- subset(plaus, p.w1 > p.x1w0)
+```
+
+
+# With DE
+
+### parameter values
+```{r}
+p.x <- 0.1 #prevalence of x
+
+##x-w relationship
+
+#gamma_0 = log(p/(1-p)) where p is the probability of having a gun 
+#for white people 
+#I'm setting this at 0.14
+p.x0 <- 0.14
+gamma_0 <- log(p.x0/(1-p.x0))
+
+# black people are more likely to have a gun than white people
+# let's say a plausible set of values would be 0-3 times more likely
+p.x1w1 <- c(0.14,0.3,0.6) ## vary 
+gamma_x <- log(p.x1w1/(1-p.x1w1)) - gamma_0
+                 
+
+###x,w,y relationship
+#beta_0 is for white people who don't have guns
+#beta_0= log(p.x0w0/(1-p.x0w0))
+p.x0w0 <- 0.5 #all plausible were this
+beta_0 <- log(p.x0w0/(1-p.x0w0))
+
+#beta_x is the direct effect. One possible value is 0, the others are positive
+p.x1w0 <- c(0.5,0.6,0.7)
+beta_x <- log(p.x1w0/(1-p.x1w0)) - beta_0
+
+#beta_w is added value of having a gun for white people 
+#we assume this does not depend on the race
+#let's assume that the chance of imprisonment increases
+#with having a gun
+p.w1 <- c(0.4,0.6,0.8) ##vary
+beta_w <- log(p.w1/(1-p.w1)) - beta_0 
+
+#no interactions
+#no confounders/covariates
+```
+
+
+### generate x, w and y
+
+```{r}
+n.reps <- 100
+
+tot.size <- length(gamma_x)*length(beta_x)*length(beta_w)
+
+test<-list()
+
+for(ii in 1:n.reps){
+n.samp <- 10000 #sample size
+
+keep.py=TE_glm=TE_x_OR=TE_x=IE_x=DE_x=RES_x=rep(NA,tot.size)
+
+l<-1
+num.df<-c(p.x1w1[1],p.x1w0[1],p.w1[1])
+
+#for loop here
+for(i in 1:length(gamma_x)){
+  for(j in 1:length(beta_x)){
+    for(k in 1:length(beta_w)){
+
+#i=1
+#j=1
+#k=1
+
+      
+#MoJ = tibble(x = rbinom(n.samp, 1, p.x)) %>%   #proportion of black offenders.
+#      mutate(p_w = invlogit(gamma_0 + gamma_x[i] * x)) %>%
+#      mutate(w =rbinom(n=length(n), size=1, prob=p_w)) %>% 
+#      mutate(p_y = exp(beta_0[j] + beta_x * x + beta_w[k] * w)/(1 + exp(beta_0[j] + beta_x * x + beta_w[k] * w))) %>%
+#      mutate(y=rbinom(n=length(n), size=1, prob=p_y))
+
+x <- rbinom(n.samp, 1, p.x)
+p_w <- invlogit(gamma_0 + gamma_x[i] * x)
+w <- rbinom(n=n.samp, size=1, p_w)
+p_y <- invlogit(beta_0 + beta_x[j] * x + beta_w[k] * w)
+y <- rbinom(n=n.samp, size=1, p_y)
+
+MoJ <- data.frame(x=x,w=w,y=y)
+      
+#constraint 1: p(y)=0.55
+keep.py[l] <- (sum(MoJ$y)/n.samp)
+
+#constraint 2: TE/NAIVE OR betwee 1.5-1.6
+TE_glm[l]<-exp(glm(y ~ x, data=MoJ, family=binomial)$coef[2])
+
+### discrete x: TE, IE, DE and RES
+beta_est <- glm(y ~ x + w, data=MoJ, family = binomial)$coef
+gamma_est <- glm(w ~ x, data=MoJ, family=binomial)$coef
+
+#TE calculated the Maggi way
+TE_x[l] <- beta_est[2] + 
+  log((1 + exp(g.fun(1,1,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun(0,1,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))) - 
+  log((1 + exp(g.fun(1,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun(0,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2]))))
+
+TE_x_OR[l] <- exp(TE_x[l])
+
+#IE calculated the Maggi way
+IE_x[l] <- log((1 + exp(g.fun.star(1,1,beta_00 = beta_est[1], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun.star(0,1,beta_00 = beta_est[1], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))) - 
+  log((1 + exp(g.fun(1,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun(0,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2]))))
+
+#DE calculated the Raggi way 
+DE_x[l] <- beta_est[2]
+
+#RES caluclated the Raggi way
+RES_x[l] <- TE_x[l] - DE_x[l] - IE_x[l] 
+
+l<-l+1
+num.df <- rbind(num.df,c(p.x1w1[i],p.x1w0[j],p.w1[k]))
+    }
+  }
+}
+num.df<-num.df[-1,]
+internal<-cbind(num.df, keep.py,TE_glm, TE_x_OR, TE_x, IE_x, DE_x, RES_x)
+#print(dim(internal))
+#print(dim(test))
+test[[ii]] <- internal
+}
+testy <- unlist(test)
+testy<-array(testy,dim=c(tot.size,10,n.reps))
+mean.vals <- data.frame(round(apply(testy,c(1,2), mean),3))
+colnames(mean.vals) <- c("p.x1w1","p.x1w0","p.w1","keep.py","TE_glm", "TE_x_OR", "TE_x", "IE_x", "DE_x", "RES_x")
+sd.vals <- data.frame(round(apply(testy,c(1,2), sd),3))
+colnames(sd.vals) <- colnames(mean.vals)
+
+#write.csv(mean.vals, "mean.vals.no.1.csv", row.names = FALSE)
+#write.csv(sd.vals, "sd.vals.no.1.csv", row.names = FALSE)
+
+#test<-cbind(num.df, test)
+#plaus <- subset(mean.vals, TE_glm>1.3)
+#plaus <- subset(plaus, p.w1 > p.x1w0)
+```
+
+```{r}
+#test<-cbind(num.df, test)
+plaus <- subset(mean.vals, (keep.py > 0.53) & (keep.py < 0.57) & (p.yx1w1 >= p.yx0w1))
+plaus <- subset(plaus, p.w1 > p.x1w0)#
+plaus <- subset(plaus, (TE_x_OR > 1.45) & (TE_x_OR < 1.6))
+
+plaus <- plaus %>% 
+  mutate(p.yx1w1 = jitter(p.yx1w1)) %>%
+  mutate(p.yx0w1 = jitter(p.yx0w1))
+
+#create polygons,
+subs0.14 <- subset(plaus,p.x1w1==0.14)  %>% dplyr::select(p.yx0w1, p.yx1w1) %>% slice(chull(.)) %>% mutate(prob_blk_weap = "0.14")
+subs0.3 <- subset(plaus,p.x1w1==0.3)  %>% dplyr::select(p.yx0w1, p.yx1w1) %>% slice(chull(.)) %>% mutate(prob_blk_weap = "0.3")
+subs0.6 <- subset(plaus,p.x1w1==0.6)  %>% dplyr::select(p.yx0w1, p.yx1w1) %>% slice(chull(.))%>% mutate(prob_blk_weap = "0.6")
+
+subs <- rbind(subs0.14, subs0.3, subs0.6)
+
+ggplot() + 
+geom_polygon(subs, mapping=aes(x=p.yx0w1,y=p.yx1w1, fill=prob_blk_weap, alpha=0.5))+ 
+  xlim(0.5,1) + ylim(0,1) +  
+  guides(alpha = "none") +
+  xlab("prob of white going to jail if have weapon") +
+  ylab("prob of black going to jail if have weapon") +
+  ggtitle("Range of values with overall prob of incarceration=0.55") #+
+#  geom_abline(a=0,b=1)
+
+
+#the areas overlap which means the prevalence of the unobs mediator in the pop
+# is not important and cannot explain the observed direct effect and overall rate of incarceration
+#except in some high p.yx0w1 cases.
+
+#express in ratios/parameter values as well
+
+
+
+
+
+```
