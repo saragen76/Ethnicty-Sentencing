@@ -1,0 +1,232 @@
+---
+title: "decomp_sims"
+output: pdf_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(arm)
+library(ggplot2)
+```
+
+I'm following Raggi et al.
+
+
+# With interaction
+
+the $g$ function
+
+```{r}
+g.fun.int <- function(xx,yy, beta_00, beta_xx, beta_ww, beta_xxww, gamma_00, gamma_xx){
+  yy*(beta_ww) + beta_xxww + log((1 +  exp(beta_00 + beta_xx * xx))/
+          (1 + exp(beta_00 + beta_xx * xx + beta_ww + beta_xxww * xx))) + gamma_00 + gamma_xx * xx
+  }
+
+
+#g.fun evaluated at beta_xx=0
+g.fun.star.int <- function(xx,yy, beta_00, beta_ww, gamma_00, gamma_xx){  yy*(beta_ww) +  log((1 +  exp(beta_00))/
+          (1 + exp(beta_00 + beta_ww ))) + gamma_00 + gamma_xx * xx
+}
+
+```
+
+
+### parameter values with DE
+```{r}
+p.x <- 0.1 #prevalence of x
+
+##x-w relationship
+
+#gamma_0 = log(p/(1-p)) where p is the probability of having a gun 
+#for white people 
+#I'm setting this at 0.14
+p.x0 <- 0.14 #0.3 #0.5
+gamma_0 <- log(p.x0/(1-p.x0))
+
+# black people are more likely to have a gun than white people
+# let's say a plausible set of values would be 0-3 times more likely
+p.x1w1 <-  c(0.14,0.3,0.6) ## vary 
+gamma_x <- log(p.x1w1/(1-p.x1w1)) - gamma_0
+                 
+
+###x,w,y relationship
+#beta_0 is for white people who don't have guns
+#beta_0= log(p.x0w0/(1-p.x0w0))
+p.x0w0 <- 0.5 #all plausible were this
+beta_0 <- log(p.x0w0/(1-p.x0w0))
+
+#beta_x is the direct effect. One possible value is 0, the others are positive
+#beta_x <- log(c(1,1.2,1.5,2))
+beta_x <- 0
+
+#beta_w is added value of having a gun for white people 
+#let's assume that the chance of imprisonment increases
+#with having a gun and more so for black people
+#whites
+p.yx0w1 <- c(0.5, 0.6, 0.7, 0.8) ##vary
+beta_w <- log(p.yx0w1/(1-p.yx0w1)) - beta_0 
+
+#blacks
+p.yx1w1 <- p.yx0w1 + p.yx0w1*0.10  #10 % more for blacks
+beta_wx <- log(p.yx1w1/(1-p.yx1w1)) - beta_0 - beta_x - beta_w
+
+
+#no confounders/covariates
+```
+
+
+### generate x, w and y
+
+```{r}
+n.reps <- 5
+
+tot.size <- length(gamma_x)*length(beta_x)*length(beta_w)*length(beta_wx)
+
+test<-list()
+
+for(ii in 1:n.reps){
+n.samp <- 100#sample size
+
+keep.py=TE_glm=TE_is_in=TE_x_OR=TE_x=IE_x=DE_x=DE_is_in=RES_x=rep(NA,tot.size)
+
+l<-1
+num.df<-c(p.x1w1[1],beta_x[1],p.yx0w1[1],p.yx1w1[1])
+
+#for loop here
+for(i in 1:length(gamma_x)){
+  for(j in 1:length(beta_x)){
+    for(k in 1:length(beta_w)){
+      for(m in 1:length(beta_wx)){
+
+#i=j=k=m=1
+      
+#MoJ = tibble(x = rbinom(n.samp, 1, p.x)) %>%   #proportion of black offenders.
+#      mutate(p_w = invlogit(gamma_0 + gamma_x[i] * x)) %>%
+#      mutate(w =rbinom(n=length(n), size=1, prob=p_w)) %>% 
+#      mutate(p_y = exp(beta_0[j] + beta_x * x + beta_w[k] * w)/(1 + exp(beta_0[j] + beta_x * x + beta_w[k] * w))) %>%
+#      mutate(y=rbinom(n=length(n), size=1, prob=p_y))
+
+x <- rbinom(n.samp, 1, p.x)
+p_w <- invlogit(gamma_0 + gamma_x[i] * x)
+w <- rbinom(n=n.samp, size=1, p_w)
+p_y <- invlogit(beta_0 + beta_x[j] * x + beta_w[k] * w + beta_wx[m] * w * x)
+y <- rbinom(n=n.samp, size=1, p_y)
+
+MoJ <- data.frame(x=x,w=w,y=y)
+      
+#constraint 1: p(y)=0.55
+keep.py[l] <- (sum(MoJ$y)/n.samp)
+
+#constraint 2: TE/NAIVE OR betwee 1.5-1.6
+TE_glm_mod<-glm(y ~ x, data=MoJ, family=binomial)
+TE_glm[l]<-exp(TE_glm_mod$coeff[2])
+TE_se<-summary(TE_glm_mod)$coefficients[2,2]
+TE_is_in[l] <- ifelse(((TE_glm[l] < TE_glm[l]+2*TE_se) & (TE_glm[l] > TE_glm[l]-2*TE_se)),1,0)
+
+### discrete x: TE, IE, DE and RES
+beta_glm_mod <- glm(y ~ x * w, data=MoJ, family = binomial)
+beta_est<-beta_glm_mod$coef
+
+gamma_est <- glm(w ~ x, data=MoJ, family=binomial)$coef
+
+#TE calculated the Maggi way
+TE_x[l] <- beta_est[2] + 
+  log((1 + exp(g.fun.int(1,1,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],beta_xxww=beta_est[4],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun.int(0,1,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],beta_xxww=beta_est[4],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))) - 
+  log((1 + exp(g.fun.int(1,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],beta_xxww=beta_est[4],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun.int(0,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],beta_xxww=beta_est[4],gamma_00=gamma_est[1], gamma_xx = gamma_est[2]))))
+
+TE_x_OR[l] <- exp(TE_x[l])
+
+#IE calculated the Maggi way
+IE_x[l] <- log((1 + exp(g.fun.star.int(1,1,beta_00 = beta_est[1], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun.star.int(0,1,beta_00 = beta_est[1], beta_ww=beta_est[3],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))) - 
+  log((1 + exp(g.fun.int(1,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],beta_xxww=beta_est[4],gamma_00=gamma_est[1], gamma_xx = gamma_est[2])))/(1+exp(g.fun.int(0,0,beta_00 = beta_est[1], beta_xx=beta_est[2], beta_ww=beta_est[3],beta_xxww=beta_est[4],gamma_00=gamma_est[1], gamma_xx = gamma_est[2]))))
+
+#DE calculated the Raggi way 
+DE_x[l] <- beta_est[2]
+DE_se<-summary(beta_glm_mod)$coefficients[2,2]
+DE_is_in[l] <- ifelse(((DE_x[l] < DE_x[l]+2*DE_se) & (DE_x[l] > DE_x[l]-2*DE_se)),1,0)
+
+#RES caluclated the Raggi way
+RES_x[l] <- TE_x[l] - DE_x[l] - IE_x[l] 
+
+l<-l+1
+num.df <- rbind(num.df,c(p.x1w1[i],beta_x[j],p.yx0w1[k], p.yx1w1[m]))
+    }
+  }
+  }
+}
+num.df<-num.df[-1,]
+internal<-cbind(num.df, keep.py,TE_glm, TE_is_in, TE_x_OR, TE_x, IE_x, DE_x, DE_is_in, RES_x)
+#print(dim(internal))
+#print(dim(test))
+test[[ii]] <- internal
+}
+testy <- unlist(test)
+testy<-array(testy,dim=c(tot.size,13,n.reps))
+mean.vals <- data.frame(round(apply(testy,c(1,2), mean),3))
+colnames(mean.vals) <- c("p.x1w1","beta_x","p.yx0w1","p.yx1w1","keep.py","TE_glm", "TE_is_in" ,"TE_x_OR", "TE_x", "IE_x", "DE_x","DE_is_in", "RES_x")
+sim_sd.vals <- data.frame(round(apply(testy,c(1,2), sd),3))
+colnames(sim_sd.vals) <- colnames(mean.vals)
+
+#write.csv(mean.vals, "mean.vals.int.2.csv", row.names = FALSE)
+#write.csv(sd.vals, "sd.vals.int.2.csv", row.names = FALSE)
+
+#ci <- data.frame(keep.py=mean.vals$keep.py, 
+                 # keep.py.lc=mean.vals$keep.py - sd.vals$keep.py*2,
+                 # keep.py.uc=mean.vals$keep.py + sd.vals$keep.py*2,
+                 # TE_x_OR=exp(mean.vals$TE_x),
+                 # TE_x_OR.lc=exp(mean.vals$TE_x - sd.vals$TE_x*2),
+                 # TE_x_OR.uc=exp(mean.vals$TE_x + sd.vals$TE_x*2),
+                 # DE_x_OR=exp(mean.vals$DE_x),
+                 # DE_x_OR.lc=exp(mean.vals$DE_x - sd.vals$DE_x*2),
+                 # DE_x_OR.uc=exp(mean.vals$DE_x + sd.vals$DE_x*2))
+
+#ci <- cbind(mean.vals[,1:4], ci)
+```
+
+plausible subsets
+```{r}
+#test<-cbind(num.df, test)
+plaus <- subset(ci, (keep.py.lc < 0.55) & (keep.py.uc > 0.55))
+#plaus <- subset(plaus, (TE_x_OR.lc < 1.53) & (TE_x_OR.uc > 1.53))
+plaus <- subset(plaus, (p.yx0w1 < p.yx1w1))
+```
+
+plots
+```{r}
+plaus <- plaus %>% 
+  mutate(p.yx1w1 = jitter(p.yx1w1)) %>%
+  mutate(p.yx0w1 = jitter(p.yx0w1))
+
+#create polygons,
+subs0.14 <- subset(plaus,p.x1w1==0.14)  %>% dplyr::select(p.yx0w1, p.yx1w1) %>% slice(chull(.)) %>% mutate(prob_blk_weap = "0.14")
+subs0.3 <- subset(plaus,p.x1w1==0.3)  %>% dplyr::select(p.yx0w1, p.yx1w1) %>% slice(chull(.)) %>% mutate(prob_blk_weap = "0.3")
+subs0.6 <- subset(plaus,p.x1w1==0.6)  %>% dplyr::select(p.yx0w1, p.yx1w1) %>% slice(chull(.))%>% mutate(prob_blk_weap = "0.6")
+
+subs <- rbind(subs0.14, subs0.3, subs0.6)
+
+ggplot() + 
+geom_polygon(subs, mapping=aes(x=p.yx0w1,y=p.yx1w1, fill=prob_blk_weap, alpha=0.5))+ 
+  xlim(0.5,1) + ylim(0,1) +  
+  guides(alpha = "none") +
+  xlab("prob of white going to jail if have weapon") +
+  ylab("prob of black going to jail if have weapon") +
+  ggtitle("Range of values with overall prob of incarceration=0.55") #+
+#  geom_abline(a=0,b=1)
+
+
+#the areas overlap which means the prevalence of the unobs mediator in the pop
+# is not important and cannot explain the observed direct effect and overall rate of incarceration
+#except in some high p.yx0w1 cases.
+
+#express in ratios/parameter values as well
+
+
+
+
+
+```
+
+
